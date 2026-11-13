@@ -8,7 +8,7 @@ Unofficial and not affiliated with Delta. The image contains Delta's own binarie
 ## Quick start
 
 ```sh
-git clone https://github.com/Henrik-3/DeltaDevRunnerDocker && cd DeltaDevRunnerDocker
+git clone https://github.com/Henrik-3/docker-delta-dev-runner && cd docker-delta-dev-runner
 RUNNER_NAME=my-server docker compose up -d
 docker compose logs -f
 ```
