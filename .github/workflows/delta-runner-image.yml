@@ -1,0 +1,105 @@
+name: Delta runner image
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if this Delta version is already published
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: [Dockerfile, entrypoint.sh, .github/workflows/delta-runner-image.yml]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: delta-runner-image
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve latest Delta release
+        id: delta
+        run: |
+          version=$(curl -fsSL 'https://delta.dev/api/releases/stable/latest/asset?asset=delta&os=linux&arch=x86_64' | jq -r .version)
+          [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Unexpected version from release API: $version" >&2; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/delta-runner" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if this release is already published
+        id: check
+        env:
+          REF: ${{ steps.delta.outputs.image }}:${{ steps.delta.outputs.version }}
+          FORCE: ${{ github.event_name == 'push' || inputs.force }}
+        run: |
+          if [[ $FORCE != true ]] && docker manifest inspect "$REF" >/dev/null 2>&1; then
+            echo "$REF already published, nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: docker/setup-qemu-action@v3
+        if: steps.check.outputs.skip != 'true'
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.check.outputs.skip != 'true'
+
+      # Validate before anything is pushed: amd64 image loaded locally and smoke-tested.
+      - name: Build amd64 for testing
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          build-args: DELTA_VERSION=${{ steps.delta.outputs.version }}
+          tags: delta-runner:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          missing=$(docker run --rm --entrypoint sh delta-runner:test -c 'for f in ~/.local/delta.app/bin/*; do ldd "$f"; done' | grep 'not found' || true)
+          [[ -z $missing ]] || { echo "Missing shared libraries:"; echo "$missing"; exit 1; } >&2
+
+          # Full entrypoint: session bus, keyring creation + unlock, delta-app start, runner serve reaching the
+          # sign-in step. Requests one device code from Delta that is never approved and expires.
+          docker run -d --init --name smoke delta-runner:test
+          for _ in $(seq 60); do
+            docker logs smoke 2>&1 | grep -q 'open this URL in a browser to sign in' && { echo "Entrypoint reached sign-in."; docker rm -f smoke >/dev/null; exit 0; }
+            [[ $(docker inspect -f '{{.State.Running}}' smoke) == true ]] || break
+            sleep 2
+          done
+          echo "Entrypoint did not reach sign-in:" >&2; docker logs smoke >&2; docker rm -f smoke >/dev/null; exit 1
+
+      - name: Build and push amd64 + arm64
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          build-args: DELTA_VERSION=${{ steps.delta.outputs.version }}
+          tags: |
+            ${{ steps.delta.outputs.image }}:${{ steps.delta.outputs.version }}
+            ${{ steps.delta.outputs.image }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.delta.outputs.version }}
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

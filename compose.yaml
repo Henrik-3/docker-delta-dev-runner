@@ -1,0 +1,24 @@
+services:
+  delta-runner:
+    image: ghcr.io/henrik-3/delta-runner:latest
+    build: .
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      RUNNER_NAME: ${RUNNER_NAME:-docker-runner}
+    # Optional: keep the keyring password off the volume (see entrypoint.sh).
+    # secrets: [keyring_password]
+    volumes:
+      - delta-config:/home/delta/.config/delta
+      - delta-data:/home/delta/.local/share/delta
+      - delta-keyrings:/home/delta/.local/share/keyrings
+
+# secrets:
+#   keyring_password:
+#     file: ./secrets/keyring_password
+
+volumes:
+  delta-config:
+  delta-data:
+  delta-keyrings:
